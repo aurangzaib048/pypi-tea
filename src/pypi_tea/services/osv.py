@@ -2,7 +2,8 @@
 
 osv-scanner reads CycloneDX and SPDX documents, matches every package URL in them
 against the OSV database (api.osv.dev), and reports each match. A batch of SBOMs
-is scanned in one run. One unreadable SBOM fails the whole run, so a failed batch
+is scanned in one run. One unreadable SBOM fails the whole run, and one SBOM
+osv-scanner chokes on stalls it, so a batch that fails on a document or times out
 is retried one SBOM at a time to pin the failure on the document that caused it.
 """
 
@@ -32,8 +33,21 @@ _SUFFIXES = {
 }
 
 
+# When a batch is retried one SBOM at a time, this many SBOMs timing out in a row
+# means OSV is down, not that the documents are at fault.
+_TIMEOUTS_BEFORE_OUTAGE = 3
+
+
 class ScannerUnavailable(Exception):
     """osv-scanner failed for a reason that isn't the SBOM: missing binary, no network, OSV API down."""
+
+
+class ScanTimeout(ScannerUnavailable):
+    """An osv-scanner run took longer than it was given. Fatal unless narrowed down to one SBOM."""
+
+
+class _SbomError(Exception):
+    """osv-scanner rejected a document in the run. Message: its last stderr line."""
 
 
 @dataclass
@@ -188,7 +202,7 @@ def _run(binary: str, paths: list[Path], out: Path, timeout: float) -> tuple[int
     except FileNotFoundError as e:
         raise ScannerUnavailable(f"osv-scanner not found at {binary}") from e
     except subprocess.TimeoutExpired as e:
-        raise ScannerUnavailable(f"osv-scanner timed out after {timeout:.0f}s") from e
+        raise ScanTimeout(f"osv-scanner timed out after {timeout:.0f}s") from e
     return proc.returncode, proc.stderr.strip()
 
 
@@ -197,8 +211,12 @@ def _is_sbom_error(stderr: str) -> bool:
     return "extracting as sbom/" in stderr
 
 
-def scan(binary: str, sboms: list[SbomToScan], timeout: float) -> dict[str, ScanResult]:
-    """Scan SBOMs and return a result per sha256. Raises ScannerUnavailable if nothing could be scanned."""
+def scan(binary: str, sboms: list[SbomToScan], timeout: float, sbom_timeout: float) -> dict[str, ScanResult]:
+    """Scan SBOMs and return a result per sha256. Raises ScannerUnavailable if nothing could be scanned.
+
+    `timeout` bounds the run over the whole batch; `sbom_timeout` bounds each run when the batch
+    is retried one SBOM at a time. An SBOM that times out on its own gets an error result.
+    """
     if not sboms:
         return {}
     with tempfile.TemporaryDirectory(prefix="pypi-tea-osv-") as tmp:
@@ -208,10 +226,39 @@ def scan(binary: str, sboms: list[SbomToScan], timeout: float) -> dict[str, Scan
             path = root / f"{i}{_SUFFIXES[s.media_type]}"
             path.write_bytes(s.content)
             paths[s.sha256] = path
-        return _scan_paths(binary, paths, root / "report.json", timeout)
+        out = root / "report.json"
+        if len(paths) == 1:
+            return _scan_one_at_a_time(binary, paths, out, sbom_timeout)
+        try:
+            return _scan_paths(binary, paths, out, timeout)
+        except ScanTimeout as e:
+            logger.warning("batch of %d timed out (%s); scanning them one at a time", len(paths), e)
+        except _SbomError:
+            logger.info("batch of %d failed on an unreadable SBOM; scanning them one at a time", len(paths))
+        return _scan_one_at_a_time(binary, paths, out, sbom_timeout)
+
+
+def _scan_one_at_a_time(binary: str, paths: dict[str, Path], out: Path, timeout: float) -> dict[str, ScanResult]:
+    results: dict[str, ScanResult] = {}
+    timeouts_in_a_row = 0
+    for sha, path in paths.items():
+        try:
+            results.update(_scan_paths(binary, {sha: path}, out, timeout))
+        except _SbomError as e:
+            results[sha] = ScanResult(findings=[], error=str(e))
+        except ScanTimeout as e:
+            timeouts_in_a_row += 1
+            if timeouts_in_a_row >= _TIMEOUTS_BEFORE_OUTAGE:
+                raise ScannerUnavailable(f"{timeouts_in_a_row} SBOMs in a row timed out on their own: {e}") from e
+            logger.warning("SBOM %s: %s", sha, e)
+            results[sha] = ScanResult(findings=[], error=str(e))
+            continue
+        timeouts_in_a_row = 0
+    return results
 
 
 def _scan_paths(binary: str, paths: dict[str, Path], out: Path, timeout: float) -> dict[str, ScanResult]:
+    """One osv-scanner run. Raises _SbomError if it rejected a document, ScannerUnavailable otherwise."""
     code, stderr = _run(binary, list(paths.values()), out, timeout)
     if code in _OK_CODES:
         results = {sha: ScanResult(findings=[]) for sha in paths}
@@ -228,13 +275,6 @@ def _scan_paths(binary: str, paths: dict[str, Path], out: Path, timeout: float) 
         for r in results.values():
             r.findings = sort_findings(r.findings)
         return results
-    if len(paths) > 1 and _is_sbom_error(stderr):
-        logger.info("batch of %d failed on an unreadable SBOM; scanning them one at a time", len(paths))
-        results = {}
-        for sha, path in paths.items():
-            results.update(_scan_paths(binary, {sha: path}, out, timeout))
-        return results
-    if len(paths) == 1 and _is_sbom_error(stderr):
-        (sha,) = paths
-        return {sha: ScanResult(findings=[], error=stderr.splitlines()[-1][:500] if stderr else f"exit {code}")}
+    if _is_sbom_error(stderr):
+        raise _SbomError(stderr.splitlines()[-1][:500] if stderr else f"exit {code}")
     raise ScannerUnavailable(f"osv-scanner exited {code}: {stderr[-500:]}")

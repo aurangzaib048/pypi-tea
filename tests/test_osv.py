@@ -64,7 +64,7 @@ CLEAN_SBOM = {**CDX, "components": [{"type": "library", "name": "requests", "pur
 
 # Stands in for osv-scanner: same flags, exit codes and error messages, with REQUESTS_ENTRY as its whole database.
 _FAKE_SCANNER = """\
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 
 args = sys.argv[1:]
 if args == ["--version"]:
@@ -78,6 +78,9 @@ if os.environ.get("FAKE_OSV_DOWN"):
     print("Error during extraction: (extracting as vulnmatch/osvdev) max retries exceeded", file=sys.stderr)
     sys.exit(127)
 paths = [args[i + 1] for i, a in enumerate(args) if a == "--lockfile"]
+hang = os.environ.get("FAKE_OSV_HANG_ON")
+if hang and any(hang in pathlib.Path(p).read_text() for p in paths):
+    time.sleep(30)
 out = args[args.index("--output-file") + 1]
 results, packages = [], 0
 for p in paths:
@@ -280,6 +283,54 @@ async def test_scanner_outage_records_nothing(
     with pytest.raises(osv.ScannerUnavailable):
         scan.run()
     assert conn.execute("SELECT count(*) FROM osv_scans").fetchone()[0] == 0
+
+
+HANGING_SBOM = {**CDX, "components": [{"type": "library", "name": "stall", "purl": "pkg:pypi/stall@1.0"}]}
+
+
+@pytest.fixture()
+def short_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "osv_timeout_seconds", 2.0)
+    monkeypatch.setattr(settings, "osv_sbom_timeout_seconds", 1.0)
+
+
+async def test_sbom_that_stalls_the_scanner_is_recorded_without_failing_the_batch(
+    database: str, fake_scanner: Path, monkeypatch: pytest.MonkeyPatch, short_timeouts: None
+) -> None:
+    conn = db.connect(database)
+    _save_raw(conn, "mixed", [json.dumps(VULNERABLE_SBOM), json.dumps(HANGING_SBOM), json.dumps(CLEAN_SBOM)])
+    monkeypatch.setenv("FAKE_OSV_HANG_ON", "pkg:pypi/stall@")
+    assert scan.run() == (3, 1, 1)
+    scans = store.osv_scans(conn, [f"{i:064d}" for i in range(3)])
+    assert [len(scans[f"{i:064d}"]["findings"]) for i in range(3)] == [1, 0, 0]
+    assert "timed out" in scans[f"{1:064d}"]["error"]
+    # The batch, then each SBOM on its own to find the one that stalls it.
+    assert len(_calls(fake_scanner)) == 4
+    # It is not due again until the rescan interval, so the next run doesn't stall on it.
+    assert scan.run() == (0, 0, 0)
+
+
+async def test_lone_sbom_that_stalls_the_scanner_is_recorded(
+    database: str, fake_scanner: Path, monkeypatch: pytest.MonkeyPatch, short_timeouts: None
+) -> None:
+    conn = db.connect(database)
+    _save_raw(conn, "stall", [json.dumps(HANGING_SBOM)])
+    monkeypatch.setenv("FAKE_OSV_HANG_ON", "pkg:pypi/stall@")
+    assert scan.run() == (1, 0, 1)
+    assert len(_calls(fake_scanner)) == 1
+
+
+async def test_scanner_stalling_on_everything_is_an_outage_and_records_nothing(
+    database: str, fake_scanner: Path, monkeypatch: pytest.MonkeyPatch, short_timeouts: None
+) -> None:
+    conn = db.connect(database)
+    _save_raw(conn, "acme", [json.dumps(VULNERABLE_SBOM)] * 5)
+    monkeypatch.setenv("FAKE_OSV_HANG_ON", "pkg:pypi/")
+    with pytest.raises(osv.ScannerUnavailable, match="in a row timed out"):
+        scan.run()
+    assert conn.execute("SELECT count(*) FROM osv_scans").fetchone()[0] == 0
+    # The batch, then three SBOMs on their own before giving up.
+    assert len(_calls(fake_scanner)) == 4
 
 
 async def test_missing_scanner_is_unavailable(database: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

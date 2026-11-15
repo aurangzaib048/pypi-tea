@@ -35,12 +35,15 @@ class Settings(BaseSettings):
     embedded_worker: bool = False
 
     # Vulnerability scanning (pypi-tea-osv): the osv-scanner binary, how many SBOMs
-    # go into one osv-scanner run, how long a run may take, and how old a scan may
-    # get before the SBOM is scanned again. The OSV database changes daily; the
-    # SBOMs never do.
+    # go into one osv-scanner run, how long a run over a batch may take, how long a
+    # run over one SBOM may take when a failed batch is retried one at a time, and
+    # how old a scan may get before the SBOM is scanned again. A healthy batch takes
+    # seconds, so a run that hits its timeout is stuck, not slow. The OSV database
+    # changes daily; the SBOMs never do.
     osv_scanner_path: str = "osv-scanner"
     osv_batch_size: int = 50
-    osv_timeout_seconds: float = 600.0
+    osv_timeout_seconds: float = 120.0
+    osv_sbom_timeout_seconds: float = 60.0
     osv_rescan_hours: float = 24.0
 
     # Product analytics (see analytics.py). The project key is public by design:

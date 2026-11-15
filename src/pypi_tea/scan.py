@@ -26,7 +26,7 @@ logger = logging.getLogger("pypi_tea.scan")
 
 
 def run(limit: int = 0, rescan_all: bool = False) -> tuple[int, int, int]:
-    """Scan what's due. Returns (SBOMs scanned, SBOMs with findings, SBOMs osv-scanner couldn't read)."""
+    """Scan what's due. Returns (SBOMs scanned, SBOMs with findings, SBOMs osv-scanner couldn't read or stalled on)."""
     db.init_schema(settings.database_path)
     conn = db.writer(settings.database_path)
     scanner = f"osv-scanner {osv.scanner_version(settings.osv_scanner_path)}"
@@ -47,7 +47,9 @@ def run(limit: int = 0, rescan_all: bool = False) -> tuple[int, int, int]:
                 batch.append(osv.SbomToScan(sha, media_type, content))
             else:
                 results.append((sha, f"osv-scanner does not read {media_type}", []))
-        for sha, result in osv.scan(settings.osv_scanner_path, batch, settings.osv_timeout_seconds).items():
+        for sha, result in osv.scan(
+            settings.osv_scanner_path, batch, settings.osv_timeout_seconds, settings.osv_sbom_timeout_seconds
+        ).items():
             results.append((sha, result.error, list(result.findings)))
         store.save_osv_scans(conn, scanner, results)
         scanned += len(results)
