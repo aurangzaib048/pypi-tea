@@ -121,7 +121,8 @@ All settings are configurable via environment variables with the `PYPI_TEA_` pre
 | `PYPI_TEA_EMBEDDED_WORKER` | `false` | Run the worker inside the API process (development/tests only) |
 | `PYPI_TEA_OSV_SCANNER_PATH` | `osv-scanner` | osv-scanner binary used by `pypi-tea-osv` |
 | `PYPI_TEA_OSV_BATCH_SIZE` | `50` | SBOMs per osv-scanner run |
-| `PYPI_TEA_OSV_TIMEOUT_SECONDS` | `600` | Longest one osv-scanner run may take |
+| `PYPI_TEA_OSV_TIMEOUT_SECONDS` | `120` | Longest one osv-scanner run over a batch may take |
+| `PYPI_TEA_OSV_SBOM_TIMEOUT_SECONDS` | `60` | Longest one osv-scanner run over a single SBOM may take, when a batch that failed or timed out is retried one SBOM at a time; an SBOM that still times out is recorded as an error |
 | `PYPI_TEA_OSV_RESCAN_HOURS` | `24` | Rescan an SBOM once its last scan is this old |
 | `PYPI_TEA_POSTHOG_API_KEY` | sbomify's project key | PostHog project key for analytics; set it empty to turn analytics off |
 | `PYPI_TEA_POSTHOG_HOST` | `https://us.i.posthog.com` | PostHog ingestion host |
