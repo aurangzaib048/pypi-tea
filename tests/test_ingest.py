@@ -278,6 +278,29 @@ def test_concurrent_writers_queue_instead_of_timing_out(database: str) -> None:
     assert sum(jobs.depth(db.connect(database)).values()) == threads
 
 
+def test_scheduled_refresh_writes_hold_write_lock(database: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduler's writes queue on write_lock like the job loops', rather than racing them in the busy handler."""
+    unlocked: list[str] = []
+    real_enqueue_many, real_set_meta = jobs.enqueue_many, store.set_meta
+
+    def enqueue_many(conn: sqlite3.Connection, items: list[tuple[str, str]], priority: int) -> None:
+        if not db.write_lock.locked():
+            unlocked.append("enqueue_many")
+        real_enqueue_many(conn, items, priority)
+
+    def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+        if not db.write_lock.locked():
+            unlocked.append(f"set_meta {key}")
+        real_set_meta(conn, key, value)
+
+    monkeypatch.setattr(jobs, "enqueue_many", enqueue_many)
+    monkeypatch.setattr(store, "set_meta", set_meta)
+    worker._maybe_schedule_refresh()  # first start: only starts the clock
+    real_set_meta(db.writer(database), worker._LAST_REFRESH_KEY, "0")
+    worker._maybe_schedule_refresh()  # overdue: enqueues the refresh
+    assert unlocked == []
+
+
 # --- review regressions ---
 
 

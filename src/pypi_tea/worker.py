@@ -181,12 +181,14 @@ def enqueue_refresh(existing: bool = True, limit: int = 0) -> tuple[int, int]:
     names = store.all_product_names(conn)
     if limit:
         names = names[:limit]
-    jobs.enqueue_many(conn, [(n, "") for n in names], jobs.PRIORITY_REFRESH)
+    with db.write_lock:
+        jobs.enqueue_many(conn, [(n, "") for n in names], jobs.PRIORITY_REFRESH)
     releases: list[tuple[str, str]] = []
     if existing:
         wanted = set(names)
         releases = [k for k in store.all_release_keys(conn) if k[0] in wanted]
-        jobs.enqueue_many(conn, releases, jobs.PRIORITY_REFRESH)
+        with db.write_lock:
+            jobs.enqueue_many(conn, releases, jobs.PRIORITY_REFRESH)
     return len(names), len(releases)
 
 
@@ -196,11 +198,13 @@ def _maybe_schedule_refresh() -> None:
     now = int(time.time())
     if last is None:
         # First start: don't refresh straight away, just start the clock.
-        store.set_meta(conn, _LAST_REFRESH_KEY, str(now))
+        with db.write_lock:
+            store.set_meta(conn, _LAST_REFRESH_KEY, str(now))
         return
     if now - int(last) < REFRESH_INTERVAL:
         return
-    store.set_meta(conn, _LAST_REFRESH_KEY, str(now))
+    with db.write_lock:
+        store.set_meta(conn, _LAST_REFRESH_KEY, str(now))
     projects, releases = enqueue_refresh(existing=True)
     logger.info("scheduled refresh: %d projects, %d releases", projects, releases)
 
