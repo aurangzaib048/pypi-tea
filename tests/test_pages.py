@@ -5,6 +5,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
 import httpx
@@ -185,6 +186,15 @@ async def test_robots_keeps_crawlers_off_the_api(client: httpx.AsyncClient) -> N
     for path in ("/artifact/", "/discovery", "/product"):
         assert f"Disallow: {path}" in text
     assert f"Sitemap: {settings.server_root_url}/sitemap.xml" in text
+
+    robots = RobotFileParser()
+    robots.parse(text.splitlines())
+    v = f"/v{settings.tea_spec_version}"
+    for path in (v, f"{v}/discovery", f"{v}/stats", "/componentRelease/x", "/productReleases", "/stats/usage"):
+        assert not robots.can_fetch("*", path), path
+    # Only the versioned API mount is off-limits, not every path starting with "v".
+    for path in ("/", "/packages", "/package/a/1", "/vulnerabilities"):
+        assert robots.can_fetch("*", path), path
 
 
 async def test_stats(client: httpx.AsyncClient, fake_pypi: FakePyPI) -> None:

@@ -38,7 +38,9 @@ _DISALLOW = (
     "/discovery",
     "/product",
     "/stats",
-    "/v",
+    # The versioned TEA API mount (see `app._version_prefix`). Spelled out so the
+    # rule doesn't also hide any future page whose path happens to start with "v".
+    f"/v{settings.tea_spec_version}",
 )
 
 
