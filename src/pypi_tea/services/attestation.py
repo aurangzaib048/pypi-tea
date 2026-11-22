@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic import ValidationError
 from pypi_attestations import Distribution, Provenance, VerificationError
 
 from pypi_tea.config import settings
@@ -77,7 +78,16 @@ async def fetch_provenance(
 def verify_provenance(provenance_data: dict[str, Any], filename: str, sha256_digest: str) -> AttestationResult:
     """Verify a PEP 740 provenance object. Returns result for the first successfully verified attestation."""
     provenance = Provenance.model_validate(provenance_data)
-    dist = Distribution(name=filename, digest=sha256_digest)
+    try:
+        dist = Distribution(name=filename, digest=sha256_digest)
+    except ValidationError as e:
+        # PyPI has accepted some wheel filenames that `packaging` now rejects, such as a
+        # dotted Python tag ("contrast310.314"). The attestation can't be checked against
+        # a name the verifier won't parse. That is a property of the wheel, not a fault
+        # here, so it is recorded as a warning rather than reported as an error.
+        reason = "; ".join(str(err.get("msg", "")) for err in e.errors()) or str(e)
+        logger.warning("Cannot verify attestation for %s: %s", filename, reason)
+        return AttestationResult(status="failed", error=f"Wheel filename not verifiable: {reason}")
 
     for bundle in provenance.attestation_bundles:
         publisher = bundle.publisher
