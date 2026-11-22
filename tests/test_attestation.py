@@ -1,9 +1,11 @@
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from pydantic import BaseModel, ValidationError, field_validator
 
 from pypi_tea.services.attestation import (
     AttestationResult,
@@ -162,6 +164,43 @@ def test_verify_provenance_failed(mock_provenance_cls: MagicMock) -> None:
 
     assert result.status == "failed"
     assert result.error is not None
+
+
+def _filename_validation_error(filename: str) -> ValidationError:
+    """The error pypi-attestations raises for a wheel name `packaging` rejects (packaging >= 26.3 for dotted tags)."""
+
+    class _Dist(BaseModel):
+        name: str
+
+        @field_validator("name")
+        @classmethod
+        def _check(cls, v: str) -> str:
+            raise ValueError(f"Invalid wheel filename (invalid tag component): {v!r}")
+
+    try:
+        _Dist(name=filename)
+    except ValidationError as e:
+        return e
+    raise AssertionError("unreachable")
+
+
+@patch("pypi_tea.services.attestation.Distribution")
+@patch("pypi_tea.services.attestation.Provenance")
+def test_verify_provenance_unparseable_filename(
+    mock_provenance_cls: MagicMock, mock_distribution_cls: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wheel name the verifier can't parse is a failed check logged as a warning, not an error sent to Sentry."""
+    filename = "contrast_agent_bundle-11.5.0-contrast310.314-none-any.whl"
+    mock_distribution_cls.side_effect = _filename_validation_error(filename)
+
+    with caplog.at_level(logging.WARNING, logger="pypi_tea.attestation"):
+        result = verify_provenance(SAMPLE_PROVENANCE, filename, "abc123def456")
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.startswith("Wheel filename not verifiable: ")
+    assert "invalid tag component" in result.error
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
 
 @patch("pypi_tea.services.attestation.Provenance")
